@@ -1,0 +1,158 @@
+/**
+ *  Notify Me When to Open/Close My Windows
+ *
+ *  Author: SmartThings
+ *  Date: 2013-03-20
+ */
+definition(
+	name: "Smart Windows",
+	author: "Eric Gideon & Mark West",
+	description: "Compares indoor vs outdoor and sends an alert to open or close the windows. If you don't use an external temperature device, your zipcode will be used instead.",
+	category: "My Apps",
+	iconUrl: "https://s3.amazonaws.com/smartthings-device-icons/Home/home9-icn.png",
+	iconX2Url: "https://s3.amazonaws.com/smartthings-device-icons/Home/home9-icn@2x.png"
+)
+
+
+preferences {
+	section( "Set the temperature range for your comfort zone..." ) {
+		input "maxTemp", "number", title: "Maximum temperature"
+		input "minTemp", "number", title: "Minimum temperature"
+	}
+/*	section( "Select windows to check..." ) {
+		input "sensors", "capability.contactSensor", multiple: true
+	}
+*/	section( "Select temperature devices to monitor..." ) {
+		input "outTemp", "capability.temperatureMeasurement", title: "Outdoor (optional)", required: false
+		input "inTemp", "capability.temperatureMeasurement", title: "Indoor"
+	}
+	section( "Set your location" ) {
+		input "zipCode", "text", title: "Zip code"
+	}
+	section( "Notifications" ) {
+		input "sendPushMessage", "enum", title: "Send a push notification?", metadata:[values:["Yes","No"]], required:false
+        input "phone", "phone", title: "Phone Number (for SMS, optional)", metadata:[values:["Yes","No"]], required: false
+	}
+}
+
+
+def installed() {
+	log.debug "Installed: $settings"
+	subscribe( inTemp, "temperature", temperatureHandler )
+}
+
+def updated() {
+	log.debug "Updated: $settings"
+	unsubscribe()
+	subscribe( inTemp, "temperature", temperatureHandler )
+}
+
+def initialize() {
+	//
+}
+
+def temperatureHandler(evt) {
+
+	def currentOutTemp = null
+	if ( outTemp ) {
+		currentOutTemp = outTemp.latestValue("temperature")
+	} else {
+		log.debug "No external temperature device set. Checking WUnderground...."
+		currentOutTemp = weatherCheck()
+	}
+
+	def currentInTemp = evt.doubleValue
+	//def openWindows = sensors.findAll { it?.latestValue("contact") == 'open' }
+
+	log.trace "Temp event: $evt"
+	log.info "In: $currentInTemp; Out: $currentOutTemp"
+
+	// Don't spam notifications
+	// *TODO* use state.foo from Severe Weather Alert to do this better
+	def retryPeriod = 480
+
+	def timeAgo = new Date(now() - (1000 * 60 * retryPeriod).toLong())
+	def recentEvents = inTemp.eventsSince(timeAgo)
+    
+
+	// Test to see if the house can be cooled by opening windows.
+    if ( currentInTemp > maxTemp && currentInTemp > currentOutTemp ) {
+		log.trace "Found ${recentEvents?.size() ?: 0} events in the last $retryPeriod minutes"
+		def alreadyNotified = recentEvents.count { it.doubleValue > currentOutTemp } > 1
+
+		log.info "Outside is colder than inside and inside is warmer than the max of ${maxTemp}. Windows can be used to cool the house."
+		if ( alreadyNotified ) {
+			log.debug "Already notified!"
+		} else {
+			log.debug "Sending notification"
+//			if( !openWindows ) {
+				send( "Open some windows to cool down the house! Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+			}
+	} else	if ( currentInTemp < currentOutTemp && currentInTemp > minTemp ){	
+		log.trace "Found ${recentEvents?.size() ?: 0} events in the last $retryPeriod minutes"
+		def alreadyNotified = recentEvents.count { it.doubleValue < currentOutTemp } > 1
+
+		log.info "Outside is hotter than inside and inside is warmer than the min of ${minTemp}. Windows should be closed to prevent undesired heating."
+		if ( alreadyNotified ) {
+			log.debug "Already notified!"
+		} else {
+			log.debug "Sending notification"
+//			if( openWindows ) {
+				send( "It's gotten warmer outside! You should close the windows. Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+//				send( "It's gotten warmer outside! You should close these windows: ${openWindows.join(', ')}. Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+		}
+	// Otherwise, check to see if the house can be heated by opening windows.
+	} else if ( currentInTemp < minTemp && currentInTemp < currentOutTemp ) {
+		log.trace "Found ${recentEvents?.size() ?: 0} events in the last $retryPeriod minutes"
+		def alreadyNotified = recentEvents.count { it.doubleValue < currentOutTemp } > 1
+
+		log.info "Outside is warmer than inside and inside is cooler than the minimum of ${minTemp}. Windows can be used to heat the house."
+		if ( alreadyNotified ) {
+			log.debug "Already notified!"
+		} else {
+			log.debug "Sending notification"
+//			if( !openWindows ) {
+				send( "Open some windows to heat the house! Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+			}
+	} else	if ( currentInTemp > currentOutTemp && currentInTemp < maxTemp ){
+    	log.trace "Found ${recentEvents?.size() ?: 0} events in the last $retryPeriod minutes"
+		def alreadyNotified = recentEvents.count { it.doubleValue > currentOutTemp } > 1
+
+		log.info "Outside is cooler than inside and inside is cooler than the max of ${maxTemp}. Windows should be closed to prevent undesired cooling."
+		if ( alreadyNotified ) {
+			log.debug "Already notified!"
+		} else {
+//			if( openWindows ) {
+//				send( "It's gotten colder outside! You should close these windows: ${openWindows.join(', ')}. Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+				send( "It's gotten colder outside! You should close the windows. Currently ${currentInTemp}°F inside and ${currentOutTemp}°F outside." )
+			}
+	}
+}
+
+def weatherCheck() {
+	def json = getWeatherFeature("conditions", zipCode)
+	def currentTemp = json?.current_observation?.temp_f
+
+	if ( currentTemp ) {
+    	log.debug "Temp: $currentTemp (WeatherUnderground)"
+		return currentTemp
+	} else {
+		log.warn "Did not get a temp: $json"
+		return false
+	}
+}
+
+private send(msg) {
+	if ( sendPushMessage != "No" ) {
+		log.debug( "sending push message" )
+		sendPush( msg )
+	}
+
+	if ( phone ) {
+		log.debug( "sending text message" )
+		sendSms( phone, msg )
+	}
+
+	log.info msg
+}
+
